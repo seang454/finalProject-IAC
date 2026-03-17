@@ -1,0 +1,9 @@
+{{ existing_content }}
+
+[workers]
+# node1  ansible_host=34.34.220.123
+{% for instance in gcp_workers_instances.results %}
+{% if not instance.skipped is defined and instance.name is defined %}
+{{ instance.name }} ansible_host={{ instance.networkInterfaces[0].accessConfigs[0].natIP }}
+{% endif %}
+{% endfor %}

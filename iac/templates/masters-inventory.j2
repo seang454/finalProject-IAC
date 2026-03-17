@@ -1,0 +1,22 @@
+[all:vars]
+ansible_user=seang
+ansible_ssh_private_key_file=/home/seang/.ssh/id_rsa
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_extra_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+[local]
+localhost ansible_connection=local
+
+[masters]
+{% for instance in gcp_instances.results %}
+{% if instance.name is defined and instance.skipped is not defined and instance.item.item.role == 'master' %}
+{{ instance.name }} ansible_host={{ instance.networkInterfaces[0].accessConfigs[0].natIP }}
+{% endif %}
+{% endfor %}
+
+[workers]
+{% for instance in gcp_instances.results %}
+{% if instance.name is defined and instance.skipped is not defined and instance.item.item.role == 'worker' %}
+{{ instance.name }} ansible_host={{ instance.networkInterfaces[0].accessConfigs[0].natIP }}
+{% endif %}
+{% endfor %}

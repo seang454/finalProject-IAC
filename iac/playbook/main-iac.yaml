@@ -1,0 +1,44 @@
+- name: Setup Python environment
+  hosts: localhost
+  become: true
+  tasks:
+    - import_tasks: ./tasks/set-venv.yaml
+
+
+- name: Create workers and master instances
+  hosts: localhost
+  become: false
+  vars_files:
+    - ../vars/machine.yaml
+  tasks:
+    - import_tasks: ./tasks/create-masters-task.yaml
+
+- name: Wait for masters to be reachable via SSH
+  hosts: masters
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH to come up
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        timeout: 120
+
+- name: Copy and run zsh script on master nodes
+  hosts: masters          # ← use the group name from inventory, not hardcoded hostnames
+  become: false
+  tasks:
+    - name: Copy zsh.bash to remote master nodes
+      ansible.builtin.copy:
+        src: /home/seang/devops-gen1/ansible-related/lac/task2/zsh/zsh.bash
+        dest: /tmp/zsh.bash
+        mode: '0755'
+
+    - name: Run zsh.bash on remote master nodes
+      ansible.builtin.shell:
+        cmd: /tmp/zsh.bash
+      args:
+        executable: /bin/bash
+      register: zsh_output
+
+    - name: Show zsh.bash output
+      debug:
+        msg: "{{ zsh_output.stdout_lines }}"

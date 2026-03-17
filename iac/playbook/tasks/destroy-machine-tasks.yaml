@@ -1,0 +1,89 @@
+# tasks for only create the master instance 
+- name: Loop to show machines specs
+  debug: 
+    msg: |
+      Machine Name: {{ item.name }}
+
+  loop: "{{ machines_info }}"
+  when: true 
+- name: Create GCP instance
+  google.cloud.gcp_compute_instance:
+    name: "{{ item.name }}"
+    machine_type: "{{ item.machine_type }}"
+    zone: "{{ item.zone }}"
+    project: "{{google_project_id}}"
+    auth_kind: application # is used for ADC
+    # auth_kind: "serviceaccount"
+    # service_account_file: "{{ service_account_path_server }}serviceaccount.json"
+    state: absent # absent -> delete instance 
+    disks:
+      - auto_delete: true
+        boot: true
+        initialize_params:
+          source_image: "{{ item.image }}"
+          disk_size_gb: "{{ item.disk_size }}"
+          disk_type: "{{ item.disk_type }}"
+    network_interfaces:
+      - network:
+          selfLink: "projects/{{google_project_id}}/global/networks/default"
+        access_configs:
+          - name: External NAT
+            type: ONE_TO_ONE_NAT
+    tags:
+      items:
+        - http-server
+        - https-server
+  loop: "{{ machines_info }}"
+  register: gcp_instances
+  # when: false 
+  when: true # project to delete only master instances
+    # - item.name == "master02"
+    # - item.name == "master03"
+  environment:  # for ADC
+    GOOGLE_APPLICATION_CREDENTIALS: "{{ adc_file }}"
+    GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES: "1"
+
+# Error in getting the first values  results
+- name: Debug GCP delete results
+  debug:
+    var: gcp_instances.results
+- name: Build deleted machine list
+  set_fact:
+    deleted_machines: "{{ machines_info | map(attribute='name') | list }}"
+
+- debug:
+    msg: "Deleted machines: {{ deleted_machines }}"
+
+- name: Read existing inventory
+  slurp:
+    src: "../inventory.ini"
+  register: existing_inventory
+  delegate_to: localhost
+  run_once: true
+
+- name: Remove deleted machines from inventory
+  set_fact:
+    updated_inventory: >-
+      {{
+        existing_inventory.content | b64decode
+        | regex_replace(
+            '(?m)^(' ~ (deleted_machines | join('|')) ~ ')\\s+ansible_host=.*$',
+            ''
+          )
+      }}
+  when: deleted_machines | length > 0
+
+- name: Write updated inventory
+  copy:
+    content: "{{ updated_inventory }}"
+    dest: "../inventory.ini"
+  delegate_to: localhost
+  run_once: true
+  when: deleted_machines | length > 0
+
+
+- name: Inventory cleanup summary
+  debug:
+    msg: "Removed {{ deleted_machines }} from inventory.ini"
+  when: deleted_machines | length > 0
+ 

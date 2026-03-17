@@ -1,0 +1,36 @@
+- name: Update apt cache
+  apt:
+    update_cache: yes
+
+- name: Install pip and venv
+  apt:
+    name:
+      - python3-pip
+      - python3-venv
+    state: present
+
+- name: Create venv and install google-auth and requests
+  pip:
+    name:
+      - requests
+      - google-auth
+    virtualenv: /opt/gcp-venv
+    virtualenv_command: python3 -m venv
+# # Step 1: Ensure remote directory exists
+# - name: Ensure remote credentials directory exists
+#   file:
+#     path: "{{ service_account_path_server }}"   # should be directory, e.g. /opt/credentials
+#     state: directory
+#     owner: root
+#     group: root
+#     mode: "0755"
+# # Step 2: Copy the service account file from local to remote
+# - name: Copy service account file from local to remote
+#   copy:
+#     src: "{{ service_account_path_local }}"             # local path
+#     dest: "{{ service_account_path_server }}/serviceaccount.json"   # remote path
+#     owner: root
+#     group: root
+#     mode: "0600"
+#     force: yes                                        # overwrite if exists
+#   # delegate_to: localhost

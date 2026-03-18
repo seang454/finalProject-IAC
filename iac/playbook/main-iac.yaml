@@ -4,7 +4,6 @@
   tasks:
     - import_tasks: ./tasks/set-venv.yaml
 
-
 - name: Create workers and master instances
   hosts: localhost
   become: false
@@ -13,32 +12,235 @@
   tasks:
     - import_tasks: ./tasks/create-masters-task.yaml
 
+# -------------------------------------------------------
+# Wait for ALL nodes to be reachable
+# -------------------------------------------------------
 - name: Wait for masters to be reachable via SSH
   hosts: masters
   gather_facts: false
   tasks:
-    - name: Wait for SSH to come up
+    - name: Wait for SSH to come up on masters
       ansible.builtin.wait_for_connection:
-        delay: 10
+        delay: 15
+        timeout: 180
+
+- name: Wait for workers to be reachable via SSH
+  hosts: workers
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH to come up on workers
+      ansible.builtin.wait_for_connection:
+        delay: 15
+        timeout: 180
+
+# -------------------------------------------------------
+# Fix known_hosts permissions before any SSH operations
+# -------------------------------------------------------
+- name: Fix SSH known_hosts permissions on controller
+  hosts: localhost
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Ensure .ssh directory has correct permissions
+      ansible.builtin.file:
+        path: "/home/seang/.ssh"
+        state: directory
+        owner: seang
+        group: seang
+        mode: '0700'
+
+    - name: Ensure known_hosts exists with correct permissions
+      ansible.builtin.file:
+        path: "/home/seang/.ssh/known_hosts"
+        state: touch
+        owner: seang
+        group: seang
+        mode: '0644'
+
+
+
+# -------------------------------------------------------
+# Setup Kubespray environment + generate inventory
+# Write runner script only — Justfile executes it directly
+# for live terminal output
+# -------------------------------------------------------
+# - name: Setup Kubespray Python environment and generate inventory
+#   hosts: localhost
+#   become: false
+#   vars:
+#     kubespray_dir: "{{ playbook_dir }}/../kubespray"
+#     kubespray_venv: "/home/seang/kubespray-venv"
+#     kubespray_inventory: "{{ playbook_dir }}/../kubespray/inventory/mycluster/inventory.ini"
+#     kubespray_log: "/tmp/kubespray-deploy.log"
+#     kubespray_runner: "/tmp/run-kubespray.sh"
+
+#   tasks:
+#     - name: Check if cluster.yml exists in kubespray dir
+#       ansible.builtin.stat:
+#         path: "{{ kubespray_dir }}/cluster.yml"
+#       register: cluster_yml_stat
+
+#     - name: Fail if cluster.yml not found
+#       ansible.builtin.fail:
+#         msg: "cluster.yml not found at {{ kubespray_dir }}/cluster.yml"
+#       when: not cluster_yml_stat.stat.exists
+
+#     - name: Create kubespray virtualenv
+#       ansible.builtin.command:
+#         cmd: python3 -m venv {{ kubespray_venv }}
+#         creates: "{{ kubespray_venv }}/bin/activate"
+
+#     - name: Install kubespray requirements into venv
+#       ansible.builtin.pip:
+#         requirements: "{{ kubespray_dir }}/requirements.txt"
+#         virtualenv: "{{ kubespray_venv }}"
+#         virtualenv_python: python3
+
+#     - name: Verify ansible version in kubespray venv
+#       ansible.builtin.command:
+#         cmd: "{{ kubespray_venv }}/bin/ansible --version"
+#       register: ansible_ver
+#       changed_when: false
+
+#     - name: Show ansible version being used for kubespray
+#       debug:
+#         msg: "{{ ansible_ver.stdout_lines[0] }}"
+
+#     # -------------------------------------------------------
+#     # Generate kubespray inventory
+#     # -------------------------------------------------------
+#     - name: Ensure kubespray inventory directory exists
+#       ansible.builtin.file:
+#         path: "{{ kubespray_dir }}/inventory/mycluster"
+#         state: directory
+#         mode: '0755'
+
+#     - name: Generate kubespray inventory from template
+#       ansible.builtin.template:
+#         src: "{{ playbook_dir }}/../templates/kubespray-inventory.j2"
+#         dest: "{{ kubespray_inventory }}"
+#       vars:
+#         gcp_instances:
+#           results: "{{ lookup('file', playbook_dir + '/gcp_more_instances.json') | from_json }}"
+
+#     - name: Show kubespray inventory content
+#       ansible.builtin.command:
+#         cmd: cat {{ kubespray_inventory }}
+#       register: inventory_content
+#       changed_when: false
+
+#     - name: Display kubespray inventory
+#       debug:
+#         msg: "{{ inventory_content.stdout_lines }}"
+
+#     # -------------------------------------------------------
+#     # Write runner script only — Justfile calls it directly
+#     # This is the ONLY way to get true live terminal output
+#     # -------------------------------------------------------
+#     - name: Write kubespray runner script
+#       ansible.builtin.copy:
+#         dest: "{{ kubespray_runner }}"
+#         mode: '0755'
+#         content: |
+#           #!/bin/bash
+#           set -euo pipefail
+
+#           export PATH="{{ kubespray_venv }}/bin:$PATH"
+#           export ANSIBLE_FORCE_COLOR=true
+#           export ANSIBLE_STDOUT_CALLBACK=yaml
+#           export PYTHONUNBUFFERED=1
+
+#           cd {{ kubespray_dir }}
+
+#           echo "=========================================="
+#           echo "  Kubespray HA cluster deployment starting"
+#           echo "  Log: {{ kubespray_log }}"
+#           echo "=========================================="
+
+#           {{ kubespray_venv }}/bin/ansible-playbook \
+#             -b -v \
+#             -i {{ kubespray_inventory }} \
+#             cluster.yml 2>&1 | tee {{ kubespray_log }}
+
+#           EXIT_CODE=${PIPESTATUS[0]}
+
+#           if [ $EXIT_CODE -eq 0 ]; then
+#             echo ""
+#             echo "✅ Kubernetes HA cluster deployed successfully!"
+#           else
+#             echo ""
+#             echo "❌ Kubespray deployment FAILED (exit code: $EXIT_CODE)"
+#             exit $EXIT_CODE
+#           fi
+
+#     - name: "✅ Runner script ready — Justfile will execute it next"
+#       debug:
+#         msg: "Runner written to {{ kubespray_runner }} — Kubespray will start with live output shortly"
+
+# -------------------------------------------------------
+# Copy and run zsh script on master nodes
+# -------------------------------------------------------
+- name: Copy and run zsh script on master nodes
+  hosts: masters
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH before zsh setup
+      ansible.builtin.wait_for_connection:
+        delay: 5
         timeout: 120
 
-- name: Copy and run zsh script on master nodes
-  hosts: masters          # ← use the group name from inventory, not hardcoded hostnames
-  become: false
-  tasks:
-    - name: Copy zsh.bash to remote master nodes
+    - name: Copy zsh.sh to remote master nodes
       ansible.builtin.copy:
-        src: /home/seang/devops-gen1/ansible-related/lac/task2/zsh/zsh.bash
-        dest: /tmp/zsh.bash
+        src: "{{ playbook_dir }}/../zsh/zsh.sh"
+        dest: /tmp/zsh.sh
         mode: '0755'
 
-    - name: Run zsh.bash on remote master nodes
+    - name: Run zsh.sh on remote master nodes
       ansible.builtin.shell:
-        cmd: /tmp/zsh.bash
+        cmd: /tmp/zsh.sh
       args:
         executable: /bin/bash
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      async: 600
+      poll: 15
       register: zsh_output
 
-    - name: Show zsh.bash output
+    - name: Show zsh.sh output
+      debug:
+        msg: "{{ zsh_output.stdout_lines }}"
+
+# -------------------------------------------------------
+# Copy and run zsh script on worker nodes
+# -------------------------------------------------------
+- name: Copy and run zsh script on worker nodes
+  hosts: workers
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH before zsh setup
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 120
+
+    - name: Copy zsh.sh to remote worker nodes
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../zsh/zsh.sh"
+        dest: /tmp/zsh.sh
+        mode: '0755'
+
+    - name: Run zsh.sh on remote worker nodes
+      ansible.builtin.shell:
+        cmd: /tmp/zsh.sh
+      args:
+        executable: /bin/bash
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      async: 600
+      poll: 15
+      register: zsh_output
+
+    - name: Show zsh.sh output
       debug:
         msg: "{{ zsh_output.stdout_lines }}"

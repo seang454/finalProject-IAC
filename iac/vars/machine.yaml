@@ -5,17 +5,18 @@ adc_file: "/home/seang/.config/gcloud/application_default_credentials.json"
 google_project_id: "project-9445469d-6690-4a81-aef"
 ssh_pubkey_path: "/home/seang/.ssh/id_rsa.pub"
 agent_user: "seang"
+kubespray_dir: /home/seang/final-project/iac/kubespray
 
 # Define machine spec
 machine_specs:
   master01:
     machine_type: "e2-standard-2"
-    zone: "asia-southeast2-a"
+    zone: "asia-east1-b"
     disk_size: 50
     disk_type: "pd-standard"
   master02:
     machine_type: "e2-standard-2"   # was e2-worker01
-    zone: "asia-east2-a"
+    zone: "asia-east1-a"
     disk_size: 50
     disk_type: "pd-standard"
   master03:
@@ -25,17 +26,17 @@ machine_specs:
     disk_type: "pd-standard"
   worker01:
     machine_type: "e2-standard-2"   # was e2-worker01
-    zone: "australia-southeast2-c"
+    zone: "asia-east1-c"
     disk_size: 50
     disk_type: "pd-standard"
   worker02:
     machine_type: "e2-standard-2"   # was e2-worker01
-    zone: "asia-northeast2-a"
+    zone: "us-east4-c"
     disk_size: 50
     disk_type: "pd-standard"
   worker03:
     machine_type: "e2-standard-2"   # was e2-worker01
-    zone: "asia-northeast3-b"
+    zone: "us-east4-c"
     disk_size: 50
     disk_type: "pd-standard"
   worker04:

@@ -1,27 +1,251 @@
-# tasks for only create the master instance 
+# tasks for only create the master instance
+
 - name: Loop to show machines specs
-  debug: 
+  debug:
     msg: |
       Machine Name: {{ item.name }}
+      Zone: {{ item.zone }}
   loop: "{{ machines_info }}"
-  when: true 
 
-- name: Check if public key exist 
+# -------------------------------------------------------
+# SSH Key Setup
+# -------------------------------------------------------
+- name: Check if public key exist
   stat:
     path: "{{ ssh_pubkey_path }}"
   register: ssh_pubkey_stat
 
-- name: Generate ssh key pair there is no pub key 
+- name: Generate ssh key pair if no pub key
   shell: |
-    ssh-keygen -t rsa -b 4096 -f /home/{{agent_user}}/.ssh/id_rsa -N ''
-  become_user: "{{agent_user}}"  
-  when: ssh_pubkey_stat.stat.exists == False
+    ssh-keygen -t rsa -b 4096 -f /home/{{ agent_user }}/.ssh/id_rsa -N ''
+  become_user: "{{ agent_user }}"
+  when: not ssh_pubkey_stat.stat.exists
 
-- name: Slurp pub key from local machine 
-  slurp: 
+- name: Slurp pub key from local machine
+  slurp:
     src: "{{ ssh_pubkey_path }}"
   register: ssh_pubkey
 
+# -------------------------------------------------------
+# STAGE 1: Pre-flight checks
+# -------------------------------------------------------
+
+# 1a. Check zone UP/DOWN
+- name: Check availability of each configured zone
+  ansible.builtin.command:
+    cmd: >
+      gcloud compute zones describe {{ item }}
+      --project={{ google_project_id }}
+      --format=json
+  loop: "{{ machines_info | map(attribute='zone') | unique | list }}"
+  register: zone_check_results
+  changed_when: false
+  failed_when: false
+  environment:
+    GOOGLE_APPLICATION_CREDENTIALS: "{{ adc_file }}"
+    CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+
+- name: Build available and unavailable zone lists
+  set_fact:
+    available_configured_zones: >-
+      {{
+        zone_check_results.results
+        | selectattr('rc', 'equalto', 0)
+        | map(attribute='stdout') | map('from_json')
+        | selectattr('status', 'equalto', 'UP')
+        | map(attribute='name') | list
+      }}
+    unavailable_configured_zones: >-
+      {{
+        zone_check_results.results
+        | selectattr('rc', 'equalto', 0)
+        | map(attribute='stdout') | map('from_json')
+        | selectattr('status', 'equalto', 'UP')
+        | map(attribute='name') | list
+        | symmetric_difference(machines_info | map(attribute='zone') | unique | list)
+      }}
+
+- name: Show zone availability
+  debug:
+    msg:
+      - "Available   : {{ available_configured_zones }}"
+      - "Unavailable : {{ unavailable_configured_zones }}"
+
+# 1b. Fetch ALL GCP zones for fallback remapping
+- name: Fetch ALL available zones from GCP
+  ansible.builtin.command:
+    cmd: >
+      gcloud compute zones list
+      --project={{ google_project_id }}
+      --format=json
+  register: all_gcp_zones_raw
+  changed_when: false
+  environment:
+    GOOGLE_APPLICATION_CREDENTIALS: "{{ adc_file }}"
+    CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+
+- name: Build full list of all UP zones
+  set_fact:
+    all_available_zones: >-
+      {{
+        all_gcp_zones_raw.stdout
+        | from_json
+        | selectattr('status', 'equalto', 'UP')
+        | map(attribute='name') | list
+      }}
+
+- name: Show total UP zones
+  debug:
+    msg: "Total UP zones on GCP: {{ all_available_zones | length }}"
+
+# 1c. Check instance state — RUNNING / STOPPED / NOT EXISTS
+- name: Check current state of each instance
+  ansible.builtin.command:
+    cmd: >
+      gcloud compute instances describe {{ item.name }}
+      --zone={{ item.zone }}
+      --project={{ google_project_id }}
+      --format=json
+  loop: "{{ machines_info }}"
+  loop_control:
+    label: "{{ item.name }} → {{ item.zone }}"
+  register: instance_state_check
+  changed_when: false
+  failed_when: false
+  environment:
+    GOOGLE_APPLICATION_CREDENTIALS: "{{ adc_file }}"
+    CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+
+- name: Build instance state lists
+  set_fact:
+    running_instances: >-
+      {{
+        instance_state_check.results
+        | selectattr('rc', 'equalto', 0)
+        | map(attribute='stdout') | map('from_json')
+        | selectattr('status', 'equalto', 'RUNNING')
+        | map(attribute='name') | list
+      }}
+    stopped_instances: >-
+      {{
+        instance_state_check.results
+        | selectattr('rc', 'equalto', 0)
+        | map(attribute='stdout') | map('from_json')
+        | selectattr('status', 'equalto', 'TERMINATED')
+        | map(attribute='name') | list
+      }}
+    new_instances: >-
+      {{
+        instance_state_check.results
+        | selectattr('rc', 'ne', 0)
+        | map(attribute='item') | map(attribute='name') | list
+      }}
+
+- name: Show instance state summary
+  debug:
+    msg:
+      - "RUNNING    : {{ running_instances }}"
+      - "STOPPED    : {{ stopped_instances }}"
+      - "NOT EXISTS : {{ new_instances }}"
+
+# 1d. Try to start STOPPED instances
+- name: Try to start stopped instances
+  ansible.builtin.command:
+    cmd: >
+      gcloud compute instances start {{ item }}
+      --zone={{ (machines_info | selectattr('name', 'equalto', item) | first).zone }}
+      --project={{ google_project_id }}
+      --format=json
+  loop: "{{ stopped_instances }}"
+  register: start_results
+  changed_when: start_results.rc == 0
+  failed_when: false
+  when: stopped_instances | length > 0
+  environment:
+    GOOGLE_APPLICATION_CREDENTIALS: "{{ adc_file }}"
+    CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+
+- name: Build list of start-exhausted instance names
+  set_fact:
+    start_exhausted_names: >-
+      {{
+        start_results.results | default([])
+        | selectattr('rc', 'ne', 0)
+        | selectattr('stderr', 'search', 'ZONE_RESOURCE_POOL_EXHAUSTED')
+        | map(attribute='item') | list
+      }}
+  when: stopped_instances | length > 0
+
+- name: Show instances that could not start
+  debug:
+    msg: "{{ item }} EXHAUSTED — will delete and recreate in different region"
+  loop: "{{ start_exhausted_names | default([]) }}"
+  when: (start_exhausted_names | default([])) | length > 0
+
+# 1e. Delete + release IP for start-exhausted stopped instances
+- name: Delete instance stuck in exhausted zone
+  ansible.builtin.command:
+    cmd: >
+      gcloud compute instances delete {{ item }}
+      --zone={{ (machines_info | selectattr('name', 'equalto', item) | first).zone }}
+      --project={{ google_project_id }}
+      --quiet
+  loop: "{{ start_exhausted_names | default([]) }}"
+  when: (start_exhausted_names | default([])) | length > 0
+  environment:
+    GOOGLE_APPLICATION_CREDENTIALS: "{{ adc_file }}"
+    CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+
+- name: Release old IP for start-exhausted instance
+  google.cloud.gcp_compute_address:
+    name: "{{ item }}-ip"
+    region: "{{ (machines_info | selectattr('name', 'equalto', item) | first).zone | regex_replace('-[a-z]$', '') }}"
+    project: "{{ google_project_id }}"
+    auth_kind: application
+    state: absent
+  loop: "{{ start_exhausted_names | default([]) }}"
+  when: (start_exhausted_names | default([])) | length > 0
+  environment:
+    GOOGLE_APPLICATION_CREDENTIALS: "{{ adc_file }}"
+    GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES: "1"
+  vars:
+    ansible_python_interpreter: /opt/gcp-venv/bin/python3
+
+# 1f. ONE combined remap — skip entire exhausted REGION not just zone
+- name: Remap all problematic zones in machines_info
+  set_fact:
+    machines_info: >-
+      {%- set down_zones  = unavailable_configured_zones | default([]) -%}
+      {%- set exh_names   = start_exhausted_names | default([]) -%}
+      {%- set all_zones   = all_available_zones | default([]) -%}
+      {%- set result = [] -%}
+      {%- for machine in machines_info -%}
+        {%- set needs_remap = (machine.zone in down_zones) or (machine.name in exh_names) -%}
+        {%- if not needs_remap -%}
+          {%- set _ = result.append(machine) -%}
+        {%- else -%}
+          {%- set exhausted_region = machine.zone | regex_replace('-[a-z]$', '') -%}
+          {%- set diff_region = all_zones | reject('match', '^' + exhausted_region + '-') | list -%}
+          {%- if diff_region | length > 0 -%}
+            {%- set _ = result.append(machine | combine({'zone': diff_region[0]})) -%}
+          {%- else -%}
+            {%- set _ = result.append(machine | combine({'zone': all_zones[0]})) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ result }}
+  when: >
+    (unavailable_configured_zones | default([]) | length > 0) or
+    (start_exhausted_names | default([]) | length > 0)
+
+- name: Show final machines_info after pre-flight checks
+  debug:
+    msg: "{{ item.name }} → {{ item.zone }}"
+  loop: "{{ machines_info }}"
+
+# -------------------------------------------------------
+# Reserve Static IPs
+# -------------------------------------------------------
 - name: Reserve static external IP for each machine
   google.cloud.gcp_compute_address:
     name: "{{ item.name }}-ip"
@@ -37,9 +261,12 @@
   vars:
     ansible_python_interpreter: /opt/gcp-venv/bin/python3
 
+# -------------------------------------------------------
+# Create Instances
+# -------------------------------------------------------
 - name: Create GCP instance
   google.cloud.gcp_compute_instance:
-    name: "{{ item.item.name }}"           # item.item = original machine spec from machines_info
+    name: "{{ item.item.name }}"
     machine_type: "{{ item.item.machine_type }}"
     zone: "{{ item.item.zone }}"
     project: "{{ google_project_id }}"
@@ -61,30 +288,264 @@
           - name: External NAT
             type: ONE_TO_ONE_NAT
             nat_ip:
-              address: "{{ item.address }}"  # bind reserved static IP
+              address: "{{ item.address }}"
     tags:
       items:
         - http-server
         - https-server
-  loop: "{{ gcp_addresses.results }}"      # loop over reserved IPs instead of machines_info
+  loop: "{{ gcp_addresses.results }}"
   register: gcp_instances
+  ignore_errors: true
   environment:
     GOOGLE_APPLICATION_CREDENTIALS: "{{ adc_file }}"
     GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES: "1"
   vars:
     ansible_python_interpreter: /opt/gcp-venv/bin/python3
+
+# -------------------------------------------------------
+# STAGE 2: Safety net — catch remaining EXHAUSTED on create
+#          Skip ENTIRE exhausted region on retry
+# -------------------------------------------------------
+- name: Find instances still failed due to EXHAUSTED
+  set_fact:
+    exhausted_machines: >-
+      {{
+        gcp_instances.results
+        | selectattr('failed', 'equalto', true)
+        | selectattr('msg', 'search', 'ZONE_RESOURCE_POOL_EXHAUSTED')
+        | list
+      }}
+
+- name: Show remaining exhausted machines
+  debug:
+    msg: >-
+      {{ item.item.item.name }} EXHAUSTED in {{ item.item.item.zone }}
+      — retrying in different region
+  loop: "{{ exhausted_machines }}"
+  when: exhausted_machines | length > 0
+
+- name: Release reserved IP in exhausted zone
+  google.cloud.gcp_compute_address:
+    name: "{{ item.item.item.name }}-ip"
+    region: "{{ item.item.item.zone | regex_replace('-[a-z]$', '') }}"
+    project: "{{ google_project_id }}"
+    auth_kind: application
+    state: absent
+  loop: "{{ exhausted_machines }}"
+  when: exhausted_machines | length > 0
+  environment:
+    GOOGLE_APPLICATION_CREDENTIALS: "{{ adc_file }}"
+    GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES: "1"
+  vars:
+    ansible_python_interpreter: /opt/gcp-venv/bin/python3
+
+- name: Reserve new IP in DIFFERENT region (skip exhausted region entirely)
+  google.cloud.gcp_compute_address:
+    name: "{{ item.item.item.name }}-ip"
+    region: >-
+      {%- set exhausted_region = item.item.item.zone | regex_replace('-[a-z]$', '') -%}
+      {%- set diff_region_zones = all_available_zones | reject('match', '^' + exhausted_region + '-') | list -%}
+      {%- if diff_region_zones | length > 0 -%}
+        {{ diff_region_zones[0] | regex_replace('-[a-z]$', '') }}
+      {%- else -%}
+        {{ all_available_zones[0] | regex_replace('-[a-z]$', '') }}
+      {%- endif -%}
+    project: "{{ google_project_id }}"
+    auth_kind: application
+    state: present
+  loop: "{{ exhausted_machines }}"
+  when: exhausted_machines | length > 0
+  register: fallback_addresses
+  environment:
+    GOOGLE_APPLICATION_CREDENTIALS: "{{ adc_file }}"
+    GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES: "1"
+  vars:
+    ansible_python_interpreter: /opt/gcp-venv/bin/python3
+
+- name: Retry creating instances in DIFFERENT region zone
+  google.cloud.gcp_compute_instance:
+    name: "{{ item.item.item.item.name }}"
+    machine_type: "{{ item.item.item.item.machine_type }}"
+    zone: >-
+      {%- set exhausted_region = item.item.item.item.zone | regex_replace('-[a-z]$', '') -%}
+      {%- set diff_region_zones = all_available_zones | reject('match', '^' + exhausted_region + '-') | list -%}
+      {%- if diff_region_zones | length > 0 -%}
+        {{ diff_region_zones[0] }}
+      {%- else -%}
+        {{ all_available_zones[0] }}
+      {%- endif -%}
+    project: "{{ google_project_id }}"
+    auth_kind: application
+    state: present
+    metadata:
+      ssh-keys: "{{ agent_user }}:{{ ssh_pubkey['content'] | b64decode }}"
+    disks:
+      - auto_delete: true
+        boot: true
+        initialize_params:
+          source_image: "{{ item.item.item.item.image }}"
+          disk_size_gb: "{{ item.item.item.item.disk_size }}"
+          disk_type: "{{ item.item.item.item.disk_type }}"
+    network_interfaces:
+      - network:
+          selfLink: "projects/{{ google_project_id }}/global/networks/default"
+        access_configs:
+          - name: External NAT
+            type: ONE_TO_ONE_NAT
+            nat_ip:
+              address: "{{ item.address }}"
+    tags:
+      items:
+        - http-server
+        - https-server
+  loop: "{{ fallback_addresses.results | default([]) }}"
+  when: exhausted_machines | length > 0
+  register: gcp_retry_instances
+  environment:
+    GOOGLE_APPLICATION_CREDENTIALS: "{{ adc_file }}"
+    GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES: "1"
+  vars:
+    ansible_python_interpreter: /opt/gcp-venv/bin/python3
+
+# -------------------------------------------------------
+# Post Creation — merge all results
+# -------------------------------------------------------
+- name: Merge all instances (successful + retried)
+  set_fact:
+    all_instances: >-
+      {{
+        (gcp_instances.results | selectattr('failed', 'equalto', false) | list)
+        +
+        (gcp_retry_instances.results | default([]))
+      }}
+
 - name: Write gcp_instances into json file
   copy:
-    content: "{{ gcp_instances }}"
+    content: "{{ all_instances }}"
     dest: "./gcp_more_instances.json"
   run_once: true
-  when: true
 
-- name: Create inventory from template 
-  template: 
+- name: Create inventory from template
+  template:
     src: ../templates/masters-inventory.j2
     dest: ../inventory.ini
+  vars:
+    gcp_instances:
+      results: "{{ all_instances }}"
   run_once: true
-  when: true
+
+- name: Create kubespray inventory from template
+  template:
+    src: ../templates/kubespray-inventory.j2
+    dest: /home/seang/final-project/iac/kubespray/inventory/sample/inventory.ini
+  vars:
+    gcp_instances:
+      results: "{{ all_instances }}"
+  run_once: true
+
+  
+
+
+
+
+
+# -------------------------------------------------------  ← ADD BELOW HERE
+# Sync vars file with actual running instance zones
+# -------------------------------------------------------
+- name: Collect final running instance zones from GCP
+  ansible.builtin.shell: >
+    gcloud compute instances list
+    --project={{ google_project_id }}
+    --filter="name={{ item.name }}"
+    --format=json
+  loop: "{{ machines_info }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: final_instance_info
+  changed_when: false
+  failed_when: false
+  environment:
+    GOOGLE_APPLICATION_CREDENTIALS: "{{ adc_file }}"
+    CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+
+- name: Build final name → zone map from running instances
+  set_fact:
+    final_zone_map: >-
+      {%- set result = {} -%}
+      {%- for r in final_instance_info.results -%}
+        {%- if r.rc == 0 and r.stdout | from_json | length > 0 -%}
+          {%- set instance = r.stdout | from_json | first -%}
+          {%- set name = instance.name -%}
+          {%- set zone = instance.zone.split('/')[-1] -%}
+          {%- set _ = result.update({name: zone}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ result }}
+
+- name: Show final running zones
+  debug:
+    msg: "{{ item.key }} is running in {{ item.value }}"
+  loop: "{{ final_zone_map | dict2items }}"
+
+- name: Update machine_specs zones in vars file to match running instances
+  ansible.builtin.shell: |
+    python3 << 'EOF'
+    import re
+
+    vars_file = "{{ playbook_dir }}/../vars/machine.yaml"
+    zone_map = {{ final_zone_map | to_json }}
+
+    with open(vars_file, 'r') as f:
+        lines = f.readlines()
+
+    result = []
+    current_machine = None
+
+    for line in lines:
+        match = re.match(r'^  (\w+):\s*$', line)
+        if match:
+            current_machine = match.group(1)
+
+        if current_machine and current_machine in zone_map:
+            zone_match = re.match(r'^(\s+zone:\s*")([^"]*)(".*)', line)
+            if zone_match:
+                old_zone = zone_match.group(2)
+                new_zone = zone_map[current_machine]
+                if old_zone != new_zone:
+                    print(f"Updating {current_machine}: {old_zone} → {new_zone}")
+                    line = zone_match.group(1) + new_zone + zone_match.group(3) + '\n'
+
+        result.append(line)
+
+    with open(vars_file, 'w') as f:
+        f.writelines(result)
+
+    print("Done.")
+    EOF
+  changed_when: true
+  run_once: true
+
+# -------------------------------------------------------  ← KEEP THIS LAST
 - name: Refresh inventory to pick up new hosts
   meta: refresh_inventory
+
+# ```
+
+# ---
+
+# ## Key Fix Summary
+# ```
+# BEFORE (retry in same region):        AFTER (skip entire exhausted region):
+# ──────────────────────────────────────────────────────────────────────────
+# asia-northeast3-a EXHAUSTED      asia-northeast3-a EXHAUSTED
+#   → try asia-northeast3-b ❌       → reject ALL asia-northeast3-* zones
+#   → also EXHAUSTED ❌              → pick first zone from different region
+#   → playbook FAILS                 → e.g. asia-east1-a ✅
+
+# Change in 1f remap:
+#   BEFORE: select('match', region)   → stays in same region
+#   AFTER:  reject('match', region)   → skips entire exhausted region
+
+# Change in STAGE 2 retry:
+#   BEFORE: reject('equalto', zone)   → avoids only one zone
+#   AFTER:  reject('match', region)   → avoids entire region

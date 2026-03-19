@@ -1,0 +1,13 @@
+---
+# =============================================================================
+# roles/iac/tasks/main.yml
+# Entry point — imports task files in execution order
+# =============================================================================
+
+- name: Setup Python virtual environments
+  ansible.builtin.import_tasks: setup_venv.yml
+  tags: [venv]
+
+- name: Provision GCP instances
+  ansible.builtin.import_tasks: create_instances.yml
+  tags: [create]

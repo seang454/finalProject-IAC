@@ -1,0 +1,96 @@
+---
+# =============================================================================
+# Role: etcd  –  Install and configure etcd on all cluster nodes
+# =============================================================================
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install etcd package
+  ansible.builtin.apt:
+    name: etcd
+    state: present
+
+- name: Stop etcd before reconfiguring
+  ansible.builtin.systemd:
+    name: etcd
+    state: stopped
+  ignore_errors: true
+
+# Stale data dir causes etcd to ignore the new config and re-join
+# the old single-node cluster with wrong peer URLs (localhost:2380).
+# Always wipe it so every run starts with a clean bootstrap.
+- name: Remove stale etcd data directory
+  ansible.builtin.file:
+    path: "{{ etcd_data_dir }}"
+    state: absent
+
+- name: Create etcd config directory
+  ansible.builtin.file:
+    path: "{{ etcd_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy etcd configuration
+  ansible.builtin.template:
+    src: etcd.conf.j2
+    dest: "{{ etcd_config_dir }}/etcd.conf"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Deploy etcd systemd unit
+  ansible.builtin.template:
+    src: etcd.service.j2
+    dest: /etc/systemd/system/etcd.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Reload systemd and start etcd
+  ansible.builtin.systemd:
+    name: etcd
+    enabled: true
+    state: restarted
+    daemon_reload: true
+
+# Run the health check ON the remote node itself (delegate_to).
+# Without delegate_to, Ansible runs uri from your WSL laptop which
+# has no route to GCP internal IPs — it times out every time.
+- name: Wait for etcd to be ready
+  ansible.builtin.uri:
+    url: "http://{{ internal_ip }}:{{ etcd_client_port }}/health"
+    return_content: false
+  register: etcd_health
+  until: etcd_health.status == 200
+  retries: 20
+  delay: 5
+  become: false
+  delegate_to: "{{ inventory_hostname }}"
+
+# Confirm all peers are visible before continuing to Patroni.
+# A single-member cluster means the data dir wipe didn't happen or
+# peers can't reach each other — fail fast here instead of later.
+- name: Verify etcd cluster has all members
+  ansible.builtin.command:
+    cmd: etcdctl cluster-health
+  register: etcd_cluster_check
+  changed_when: false
+  retries: 6
+  delay: 5
+  until: etcd_cluster_check.rc == 0
+
+- name: Show etcd cluster health
+  ansible.builtin.debug:
+    msg: "{{ etcd_cluster_check.stdout_lines }}"
+
+- name: Assert etcd cluster is healthy
+  ansible.builtin.assert:
+    that:
+      - "'cluster is healthy' in etcd_cluster_check.stdout"
+    fail_msg: "etcd cluster is NOT healthy — fix before continuing to Patroni"
+    success_msg: "etcd cluster is healthy"

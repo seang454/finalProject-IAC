@@ -1,0 +1,9 @@
+---
+haproxy_primary_port: 5000
+haproxy_replica_port: 5001
+haproxy_all_port: 5002
+haproxy_stats_port: 7000
+haproxy_maxconn: 1000
+haproxy_check_interval: "3s"
+haproxy_fall: 3
+haproxy_rise: 2

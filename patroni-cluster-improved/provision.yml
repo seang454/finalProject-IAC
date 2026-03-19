@@ -1,0 +1,20 @@
+---
+# =============================================================================
+# provision.yml  –  Provision GCP instances using the iac-role
+# Location : ~/final-project/patroni-cluster/provision.yml
+#
+# Run BEFORE site.yml — this creates the VMs that site.yml configures.
+#
+# Usage:
+#   ansible-playbook provision.yml              # full run
+#   ansible-playbook provision.yml --tags venv  # venv only
+#   ansible-playbook provision.yml --tags create # instances only
+# =============================================================================
+
+- name: Setup venv and provision GCP instances
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  roles:
+    - role: iac-role

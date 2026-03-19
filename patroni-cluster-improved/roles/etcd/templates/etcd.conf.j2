@@ -1,0 +1,21 @@
+# etcd configuration for {{ inventory_hostname }}
+# Managed by Ansible – do not edit manually
+
+ETCD_NAME="{{ inventory_hostname }}"
+ETCD_DATA_DIR="{{ etcd_data_dir }}"
+
+# Peer communication — internal IP only, never expose on public interface
+ETCD_LISTEN_PEER_URLS="http://{{ internal_ip }}:{{ etcd_peer_port }}"
+ETCD_INITIAL_ADVERTISE_PEER_URLS="http://{{ internal_ip }}:{{ etcd_peer_port }}"
+
+# Client communication — internal IP + loopback
+ETCD_LISTEN_CLIENT_URLS="http://{{ internal_ip }}:{{ etcd_client_port }},http://127.0.0.1:{{ etcd_client_port }}"
+ETCD_ADVERTISE_CLIENT_URLS="http://{{ internal_ip }}:{{ etcd_client_port }}"
+
+# Cluster bootstrap — all peers by internal IP
+ETCD_INITIAL_CLUSTER="{{ patroni_nodes | dict2items | map(attribute='key') | zip(patroni_nodes | dict2items | map(attribute='value')) | map('join', '=http://') | map('regex_replace', '$', ':' + etcd_peer_port | string) | join(',') }}"
+ETCD_INITIAL_CLUSTER_TOKEN="{{ etcd_cluster_token }}"
+ETCD_INITIAL_CLUSTER_STATE="new"
+
+# Enable v2 API (required by older Patroni versions)
+ETCD_ENABLE_V2="true"

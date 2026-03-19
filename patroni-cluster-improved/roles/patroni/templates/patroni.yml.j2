@@ -1,0 +1,114 @@
+# Patroni configuration for {{ inventory_hostname }}
+# Managed by Ansible – do not edit manually
+
+scope: {{ patroni_cluster_name }}
+namespace: {{ patroni_namespace }}
+name: {{ inventory_hostname }}
+
+# ── REST API ─────────────────────────────────────────────────────────────────
+restapi:
+  listen: {{ internal_ip }}:{{ patroni_restapi_port }}
+  connect_address: {{ internal_ip }}:{{ patroni_restapi_port }}
+
+# ── etcd3 ─────────────────────────────────────────────────────────────────────
+etcd3:
+  hosts:
+{% for host in etcd_hosts %}
+    - {{ host }}
+{% endfor %}
+
+# ── Bootstrap (first-time cluster initialisation) ────────────────────────────
+bootstrap:
+  dcs:
+    ttl: {{ patroni_ttl }}
+    loop_wait: {{ patroni_loop_wait }}
+    retry_timeout: {{ patroni_retry_timeout }}
+    maximum_lag_on_failover: {{ patroni_max_lag_on_failover }}
+
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+
+      parameters:
+        # Connections
+        max_connections: {{ pg_max_connections }}
+
+        # Memory
+        shared_buffers: {{ pg_shared_buffers }}
+        effective_cache_size: {{ pg_effective_cache_size }}
+        work_mem: {{ pg_work_mem }}
+        maintenance_work_mem: {{ pg_maintenance_work_mem }}
+
+        # Replication / WAL
+        wal_level: replica
+        hot_standby: "on"
+        max_wal_senders: {{ pg_max_wal_senders }}
+        max_replication_slots: {{ pg_max_replication_slots }}
+        wal_keep_size: {{ pg_wal_keep_size }}
+
+        # Logging
+        log_destination: stderr
+        logging_collector: "on"
+        log_directory: {{ postgresql_log_dir }}
+        log_filename: postgresql-%Y-%m-%d.log
+        log_rotation_age: 1d
+        log_rotation_size: 100MB
+        log_min_duration_statement: {{ pg_log_min_duration_statement }}
+        log_checkpoints: "on"
+        log_connections: "on"
+        log_disconnections: "on"
+        log_lock_waits: "on"
+
+        # Performance
+        checkpoint_completion_target: {{ pg_checkpoint_completion_target }}
+        random_page_cost: {{ pg_random_page_cost }}
+        effective_io_concurrency: {{ pg_effective_io_concurrency }}
+
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+
+  pg_hba:
+    - host replication replicator {{ cluster_network }} md5
+    - host all all {{ cluster_network }} md5
+    - host all all 0.0.0.0/0 md5
+
+  users:
+    admin:
+      password: "{{ postgresql_admin_password }}"
+      options:
+        - createrole
+        - createdb
+        - login      
+    replicator:
+      password: "{{ postgresql_replicator_password }}"
+      options:
+        - replication
+
+# ── PostgreSQL instance settings ─────────────────────────────────────────────
+postgresql:
+  listen: {{ internal_ip }}:{{ postgresql_port }}
+  connect_address: {{ internal_ip }}:{{ postgresql_port }}
+  data_dir: {{ postgresql_data_dir }}
+  bin_dir: {{ postgresql_bin_dir }}
+
+  authentication:
+    replication:
+      username: replicator
+      password: "{{ postgresql_replicator_password }}"
+    superuser:
+      username: postgres
+      password: "{{ postgresql_superuser_password }}"
+    rewind:
+      username: postgres
+      password: "{{ postgresql_superuser_password }}"
+
+  parameters:
+    unix_socket_directories: /var/run/postgresql
+
+# ── Node tags ────────────────────────────────────────────────────────────────
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

@@ -1,0 +1,67 @@
+# HAProxy configuration for PostgreSQL Patroni cluster
+# Managed by Ansible – do not edit manually
+
+global
+    maxconn {{ haproxy_maxconn }}
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    mode tcp
+    log global
+    option tcplog
+    option dontlognull
+    timeout connect 10s
+    timeout client 30m
+    timeout server 30m
+    retries 3
+
+# ── Stats page  http://<ha-proxy-external-ip>:{{ haproxy_stats_port }}/stats ───────
+listen stats
+    mode http
+    bind *:{{ haproxy_stats_port }}
+    stats enable
+    stats uri /stats
+    stats refresh 10s
+    stats admin if LOCALHOST
+
+# ── Primary (read-write) → leader only ───────────────────────────────────────
+listen postgres-primary
+    bind *:{{ haproxy_primary_port }}
+    mode tcp
+    option httpchk OPTIONS /primary
+    http-check expect status 200
+    default-server inter {{ haproxy_check_interval }} fall {{ haproxy_fall }} rise {{ haproxy_rise }} on-marked-down shutdown-sessions
+{% for name, ip in patroni_nodes.items() %}
+    server {{ name }} {{ ip }}:{{ postgresql_port }} check port {{ patroni_restapi_port }}
+{% endfor %}
+
+# ── Replicas (read-only) → load balanced ─────────────────────────────────────
+listen postgres-replica
+    bind *:{{ haproxy_replica_port }}
+    mode tcp
+    balance roundrobin
+    option httpchk OPTIONS /replica
+    http-check expect status 200
+    default-server inter {{ haproxy_check_interval }} fall {{ haproxy_fall }} rise {{ haproxy_rise }} on-marked-down shutdown-sessions
+{% for name, ip in patroni_nodes.items() %}
+    server {{ name }} {{ ip }}:{{ postgresql_port }} check port {{ patroni_restapi_port }}
+{% endfor %}
+
+# ── All nodes (leader + replicas) ────────────────────────────────────────────
+listen postgres-all
+    bind *:{{ haproxy_all_port }}
+    mode tcp
+    balance roundrobin
+    option httpchk OPTIONS /health
+    http-check expect status 200
+    default-server inter {{ haproxy_check_interval }} fall {{ haproxy_fall }} rise {{ haproxy_rise }} on-marked-down shutdown-sessions
+{% for name, ip in patroni_nodes.items() %}
+    server {{ name }} {{ ip }}:{{ postgresql_port }} check port {{ patroni_restapi_port }}
+{% endfor %}

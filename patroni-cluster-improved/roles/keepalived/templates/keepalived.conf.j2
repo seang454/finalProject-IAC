@@ -1,0 +1,54 @@
+# Keepalived configuration for {{ inventory_hostname }}
+# Managed by Ansible — do not edit manually
+#
+# VIP: {{ keepalived_vip }}
+# Role on this node: {% if keepalived_priorities[inventory_hostname] == keepalived_priorities.values() | max %}MASTER (preferred){% else %}BACKUP{% endif %}
+
+# ── Health check script ───────────────────────────────────────────────────────
+vrrp_script check_haproxy {
+    script "/etc/keepalived/check_haproxy.sh"
+    interval {{ keepalived_check_interval }}
+    rise    {{ keepalived_check_rise }}
+    fall    {{ keepalived_check_fall }}
+    weight  -20    # reduce priority by 20 if haproxy is down
+}
+
+# ── VRRP instance — manages the floating VIP ─────────────────────────────────
+vrrp_instance VI_HAPROXY {
+    # This node's initial state
+    # Highest priority = MASTER, others = BACKUP
+    state {% if keepalived_priorities[inventory_hostname] == keepalived_priorities.values() | max %}MASTER{% else %}BACKUP{% endif %}
+
+    interface {{ keepalived_interface }}
+
+    # Must be the same on all keepalived nodes for this VIP
+    virtual_router_id {{ keepalived_router_id }}
+
+    # Higher priority wins election when all nodes are healthy
+    priority {{ keepalived_priorities[inventory_hostname] }}
+
+    # How often to send VRRP advertisements (seconds)
+    advert_int 1
+
+    # Authentication between keepalived peers
+    authentication {
+        auth_type PASS
+        auth_pass {{ keepalived_auth_pass }}
+    }
+
+    # The floating VIP — moves to whichever node is MASTER
+    virtual_ipaddress {
+        {{ keepalived_vip }}/24
+    }
+
+    # Track HAProxy health — if HAProxy is down, reduce this node's priority
+    # so another node takes over the VIP
+    track_script {
+        check_haproxy
+    }
+
+    # Notify scripts (optional — uncomment to enable)
+    # notify_master "/etc/keepalived/notify.sh MASTER"
+    # notify_backup "/etc/keepalived/notify.sh BACKUP"
+    # notify_fault  "/etc/keepalived/notify.sh FAULT"
+}

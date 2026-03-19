@@ -1,0 +1,60 @@
+---
+# =============================================================================
+# roles/iac-role/tasks/setup_venv.yml
+# All dependencies already installed via requirements.txt into .venv
+# This task only:
+#   1. Installs the google.cloud Ansible collection
+#   2. Verifies gcloud and GCP auth
+# =============================================================================
+
+- name: "[venv] Install google.cloud Ansible collection"
+  ansible.builtin.command:
+    cmd: "{{ ansible_playbook_python | dirname }}/ansible-galaxy collection install google.cloud -p {{ agent_home }}/.ansible/collections --force"
+  become: false
+  changed_when: true
+
+# ── Verify ────────────────────────────────────────────────────────────────────
+- name: "[venv] Verify gcloud is available"
+  ansible.builtin.command:
+    cmd: gcloud --version
+  register: gcloud_ver
+  changed_when: false
+  become: false
+  failed_when: false
+
+- name: "[venv] Show gcloud version"
+  ansible.builtin.debug:
+    msg: "{{ gcloud_ver.stdout_lines[0] }}"
+  when: gcloud_ver.rc == 0
+
+- name: "[venv] Warn if gcloud not found"
+  ansible.builtin.debug:
+    msg: "WARNING: gcloud not found — install Google Cloud SDK manually"
+  when: gcloud_ver.rc != 0
+
+- name: "[venv] Verify GCP authentication"
+  ansible.builtin.command:
+    cmd: gcloud auth application-default print-access-token
+  register: gcp_auth_check
+  changed_when: false
+  become: false
+  failed_when: false
+  environment:
+    GOOGLE_APPLICATION_CREDENTIALS: "{{ adc_file }}"
+
+- name: "[venv] Show GCP auth status"
+  ansible.builtin.debug:
+    msg: "GCP auth: OK ✅"
+  when: gcp_auth_check.rc == 0
+
+- name: "[venv] Warn if GCP not authenticated"
+  ansible.builtin.debug:
+    msg: "WARNING: Not authenticated — run: gcloud auth application-default login"
+  when: gcp_auth_check.rc != 0
+
+- name: "[venv] Print venv summary"
+  ansible.builtin.debug:
+    msg:
+      - "Python interpreter → {{ ansible_playbook_python }}"
+      - "ansible-galaxy     → {{ ansible_playbook_python | dirname }}/ansible-galaxy"
+      - "Collection path    → {{ agent_home }}/.ansible/collections"

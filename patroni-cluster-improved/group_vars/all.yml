@@ -1,0 +1,130 @@
+---
+# =============================================================================
+# group_vars/all.yml
+# =============================================================================
+
+# ── Network ───────────────────────────────────────────────────────────────────
+cluster_network: "10.0.0.0/8"    # GCP internal network — covers all regions
+
+# Virtual IP managed by Keepalived — apps connect here
+# Must be an unused IP on the same subnet as the ha-proxy nodes
+keepalived_vip: "10.154.0.100"
+
+# ── patroni_nodes — built from internal_ip in inventory ──────────────────────
+# Uses internal_ip (GCP private IP) not ansible_host (public external IP).
+# Internal IPs are required for:
+#   - etcd peer/client communication
+#   - Patroni listen/connect_address
+#   - HAProxy backend health checks and connections
+#   - PostgreSQL listen address
+#   - pg_hba cluster_network access rules
+patroni_nodes: >-
+  {{
+    dict(
+      groups['patroni_cluster']
+      | map('extract', hostvars, 'internal_ip')
+      | zip(groups['patroni_cluster'])
+      | map('reverse') | map('list')
+    )
+  }}
+
+# ── haproxy_nodes — built from internal_ip in inventory ──────────────────────
+haproxy_nodes: >-
+  {{
+    dict(
+      groups['haproxy']
+      | map('extract', hostvars, 'internal_ip')
+      | zip(groups['haproxy'])
+      | map('reverse') | map('list')
+    )
+  }}
+
+# ── PostgreSQL ────────────────────────────────────────────────────────────────
+postgresql_version: "16"
+postgresql_port: 5432
+postgresql_bin_dir: "/usr/lib/postgresql/{{ postgresql_version }}/bin"
+postgresql_data_dir: "/var/lib/patroni/data"
+postgresql_log_dir: "/var/log/postgresql"
+
+# ── Patroni ───────────────────────────────────────────────────────────────────
+patroni_cluster_name: "postgres-cluster"
+patroni_namespace: "/db/"
+patroni_restapi_port: 8008
+patroni_config_dir: "/etc/patroni"
+patroni_home_dir: "/var/lib/patroni"
+patroni_log_dir: "/var/log/patroni"
+patroni_venv_path: "/opt/patroni-venv"
+
+patroni_ttl: 30
+patroni_loop_wait: 10
+patroni_retry_timeout: 10
+patroni_max_lag_on_failover: 1048576
+
+# ── etcd ──────────────────────────────────────────────────────────────────────
+etcd_client_port: 2379
+etcd_peer_port: 2380
+etcd_data_dir: "/var/lib/etcd/default"
+etcd_config_dir: "/etc/etcd"
+etcd_cluster_token: "patroni-etcd-cluster"
+
+# etcd_hosts built from internal IPs — used in Patroni etcd3.hosts list
+etcd_hosts: >-
+  {{ patroni_nodes.values()
+     | map('regex_replace', '$', ':' ~ etcd_client_port | string)
+     | list }}
+
+# ── Credentials (override in vault!) ─────────────────────────────────────────
+postgresql_superuser_password: "SecurePostgresPassword123!"
+postgresql_replicator_password: "SecureReplicatorPassword123!"
+postgresql_admin_password: "SecureAdminPassword123!"
+
+# ── PostgreSQL tuning ─────────────────────────────────────────────────────────
+pg_max_connections: 200
+pg_shared_buffers: "1GB"
+pg_effective_cache_size: "3GB"
+pg_work_mem: "16MB"
+pg_maintenance_work_mem: "256MB"
+pg_wal_keep_size: "1GB"
+pg_max_wal_senders: 10
+pg_max_replication_slots: 10
+pg_log_min_duration_statement: 1000
+pg_checkpoint_completion_target: 0.9
+pg_random_page_cost: 1.1
+pg_effective_io_concurrency: 200
+
+# ── HAProxy ───────────────────────────────────────────────────────────────────
+haproxy_primary_port: 5000
+haproxy_replica_port: 5001
+haproxy_all_port: 5002
+haproxy_stats_port: 7000
+haproxy_maxconn: 1000
+haproxy_check_interval: "3s"
+haproxy_fall: 3
+haproxy_rise: 2
+
+# ── Keepalived ────────────────────────────────────────────────────────────────
+keepalived_interface: "ens4"    # GCP Ubuntu 22.04 uses ens4; verify with: ip a
+keepalived_router_id: 51
+keepalived_auth_pass: "hapass01"
+keepalived_check_interval: 2
+keepalived_check_rise: 2
+keepalived_check_fall: 3
+
+# Priority built dynamically — first ha-proxy gets highest priority
+keepalived_priorities: >-
+  {{
+    dict(
+      groups['haproxy']
+      | zip(
+          range(
+            100 + groups['haproxy'] | length,
+            100,
+            -1
+          )
+        )
+    )
+  }}
+
+# ── Ansible connection defaults ───────────────────────────────────────────────
+ansible_become: true
+ansible_python_interpreter: /usr/bin/python3

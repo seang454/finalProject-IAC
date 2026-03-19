@@ -1,5 +1,0 @@
----
-# PostgreSQL service is managed by Patroni – no direct handlers needed here
-- name: Reload systemd
-  ansible.builtin.systemd:
-    daemon_reload: true

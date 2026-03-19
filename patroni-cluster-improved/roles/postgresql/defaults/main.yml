@@ -1,6 +1,0 @@
----
-postgresql_version: "16"
-postgresql_port: 5432
-postgresql_bin_dir: "/usr/lib/postgresql/{{ postgresql_version }}/bin"
-postgresql_data_dir: "/var/lib/patroni/data"
-postgresql_log_dir: "/var/log/postgresql"

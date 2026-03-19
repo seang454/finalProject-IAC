@@ -1,3 +1,0 @@
----
-# No handlers needed for iac role
-# GCP API calls are stateless — no services to restart

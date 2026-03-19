@@ -157,6 +157,15 @@
           {{ cluster_status.json.members | length }} — fix cluster before continuing
         success_msg: "All {{ patroni_nodes | length }} Patroni members are present"
 
+- name: Setup pgBackRest backup
+  hosts: patroni_cluster
+  gather_facts: true
+  become: true
+  tags: [pgbackrest, backup]
+
+  roles:
+    - role: pgbackrest
+
 # ── 8. Setup HAProxy on dedicated ha-proxy nodes ──────────────────────────────
 - name: Setup HAProxy load balancer
   hosts: haproxy

@@ -46,55 +46,59 @@ refresh:
 site:
     @echo "Starting Patroni HA database cluster setup..."
     python3 refresh_inventory.py
-    {{ venv }}/ansible-playbook site.yml
+    {{ venv }}/ansible-playbook site.yml --ask-become-pass
 
 # Run with vault password prompt
 site-vault:
     @echo "🔐 Starting cluster setup with vault..."
-    {{ venv }}/ansible-playbook site.yml --ask-vault-pass
+    {{ venv }}/ansible-playbook site.yml --ask-vault-pass --ask-become-pass
 
 # ── Individual roles ──────────────────────────────────────────────────────────
 
 # Configure /etc/hosts on all nodes
 hosts:
     @echo "📋 Configuring hostnames..."
-    {{ venv }}/ansible-playbook site.yml --tags hosts
+    {{ venv }}/ansible-playbook site.yml --tags hosts --ask-become-pass
 
 # Install and start etcd cluster
 etcd:
     @echo "🗄️  Setting up etcd cluster..."
-    {{ venv }}/ansible-playbook site.yml --tags etcd
+    {{ venv }}/ansible-playbook site.yml --tags etcd --ask-become-pass
 
 # Install PostgreSQL
 postgresql:
     @echo "🐘 Installing PostgreSQL..."
-    {{ venv }}/ansible-playbook site.yml --tags postgresql
+    {{ venv }}/ansible-playbook site.yml --tags postgresql --ask-become-pass
 
 # Install and configure Patroni
 patroni:
     @echo "👑 Configuring Patroni..."
-    {{ venv }}/ansible-playbook site.yml --tags patroni
+    {{ venv }}/ansible-playbook site.yml --tags patroni --ask-become-pass
 
 # Bootstrap leader only
 patroni-leader:
     @echo "👑 Bootstrapping Patroni leader..."
-    {{ venv }}/ansible-playbook site.yml --tags patroni-leader
+    {{ venv }}/ansible-playbook site.yml --tags patroni-leader --ask-become-pass
 
 # Join replicas
 patroni-replicas:
     @echo "🔁 Joining Patroni replicas..."
-    {{ venv }}/ansible-playbook site.yml --tags patroni-replicas
+    {{ venv }}/ansible-playbook site.yml --tags patroni-replicas --ask-become-pass
 
 # Install and configure HAProxy
 haproxy:
     @echo "⚖️  Setting up HAProxy..."
-    {{ venv }}/ansible-playbook site.yml --tags haproxy
+    {{ venv }}/ansible-playbook site.yml --tags haproxy --ask-become-pass
 
 # Install and configure Keepalived
 keepalived:
     @echo "💓 Setting up Keepalived VIP..."
-    {{ venv }}/ansible-playbook site.yml --tags keepalived
+    {{ venv }}/ansible-playbook site.yml --tags keepalived --ask-become-pass
 
+# install backup
+backup:
+    @echo "💓 Setting up Keepalived VIP..."
+    {{ venv }}/ansible-playbook site.yml --tags backup --ask-become-pass
 # ── Operations ────────────────────────────────────────────────────────────────
 
 # Verify cluster health

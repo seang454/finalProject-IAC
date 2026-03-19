@@ -1,0 +1,7 @@
+---
+- name: Run pgbackrest stanza check
+  ansible.builtin.command:
+    cmd: pgbackrest --stanza={{ patroni_cluster_name }} check
+  become: true
+  become_user: postgres
+  changed_when: false

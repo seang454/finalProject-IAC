@@ -30,6 +30,12 @@ bootstrap:
       use_slots: true
 
       parameters:
+      
+        # Enable WAL archiving
+        archive_mode: "on"
+        archive_command: 'pgbackrest --stanza=postgres-cluster archive-push %p'
+        archive_timeout: 60
+
         # Connections
         max_connections: {{ pg_max_connections }}
 

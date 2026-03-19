@@ -1,0 +1,151 @@
+---
+# =============================================================================
+# Role: pgbackrest — Install and configure pgBackRest backup for Patroni cluster
+#
+# This role runs on ALL pg-nodes but only takes backups from the PRIMARY.
+# Patroni's REST API is used to detect which node is the current leader.
+# =============================================================================
+
+# ── Install ───────────────────────────────────────────────────────────────────
+- name: "[pgbackrest] Update apt cache"
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: "[pgbackrest] Install pgBackRest"
+  ansible.builtin.apt:
+    name: pgbackrest
+    state: present
+
+# ── Directories ───────────────────────────────────────────────────────────────
+- name: "[pgbackrest] Create config directory"
+  ansible.builtin.file:
+    path: "{{ pgbackrest_config_dir }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0750"
+
+- name: "[pgbackrest] Create repository directory"
+  ansible.builtin.file:
+    path: "{{ pgbackrest_repo_path }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0750"
+
+- name: "[pgbackrest] Create log directory"
+  ansible.builtin.file:
+    path: "{{ pgbackrest_log_dir }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0750"
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+- name: "[pgbackrest] Deploy pgbackrest.conf"
+  ansible.builtin.template:
+    src: pgbackrest.conf.j2
+    dest: "{{ pgbackrest_config_file }}"
+    owner: postgres
+    group: postgres
+    mode: "0640"
+
+# ── Stanza create (leader only) ───────────────────────────────────────────────
+# Check if this node is the current Patroni leader before running stanza-create.
+# Stanza-create only needs to run once on the primary — it initialises the
+# backup repository. Running it on a replica fails because the replica is
+# read-only and pgBackRest cannot connect via the socket.
+- name: "[pgbackrest] Check if this node is the Patroni leader"
+  ansible.builtin.uri:
+    url: "http://{{ internal_ip }}:{{ patroni_restapi_port }}/leader"
+    return_content: false
+    status_code: [200, 503]
+  register: patroni_leader_check
+  become: false
+  delegate_to: "{{ inventory_hostname }}"
+
+- name: "[pgbackrest] Create stanza on leader only"
+  ansible.builtin.command:
+    cmd: >
+      pgbackrest --stanza={{ patroni_cluster_name }}
+      --pg1-path={{ postgresql_data_dir }}
+      --pg1-port={{ postgresql_port }}
+      --pg1-socket-path=/var/run/postgresql
+      stanza-create
+  become: true
+  become_user: postgres
+  register: stanza_create
+  changed_when: stanza_create.rc == 0
+  failed_when:
+    - stanza_create.rc != 0
+    - "'already exists' not in stanza_create.stderr"
+  when: patroni_leader_check.status == 200
+
+- name: "[pgbackrest] Show stanza-create result"
+  ansible.builtin.debug:
+    msg: "{{ stanza_create.stdout_lines | default(['skipped — not the leader']) }}"
+
+# ── Verify (leader only) ───────────────────────────────────────────────────────
+- name: "[pgbackrest] Verify stanza configuration on leader"
+  ansible.builtin.command:
+    cmd: pgbackrest --stanza={{ patroni_cluster_name }} check
+  become: true
+  become_user: postgres
+  register: pgbackrest_check
+  changed_when: false
+  when: patroni_leader_check.status == 200
+
+- name: "[pgbackrest] Show stanza check result"
+  ansible.builtin.debug:
+    msg: "{{ pgbackrest_check.stdout_lines | default(['skipped — not the leader']) }}"
+
+- name: "[pgbackrest] Assert stanza check passed on leader"
+  ansible.builtin.assert:
+    that:
+      - pgbackrest_check.rc == 0
+    fail_msg: "pgBackRest stanza check failed — fix before taking backups"
+    success_msg: "pgBackRest is configured and ready on {{ inventory_hostname }}"
+  when: patroni_leader_check.status == 200
+
+# ── Cron job (leader only) ─────────────────────────────────────────────────────
+# Full backup every Sunday at 1am, differential every day at 1am (except Sunday).
+# These only run if this node is the leader at cron time — Patroni's /leader
+# endpoint returns 200 only on the primary, so the backup is skipped silently
+# on replicas.
+- name: "[pgbackrest] Add full backup cron job (Sunday 01:00)"
+  ansible.builtin.cron:
+    name: "pgbackrest full backup"
+    user: postgres
+    weekday: "0"
+    hour: "1"
+    minute: "0"
+    job: >
+      curl -sf http://{{ internal_ip }}:{{ patroni_restapi_port }}/leader > /dev/null
+      && pgbackrest --stanza={{ patroni_cluster_name }} --type=full backup
+      >> {{ pgbackrest_log_dir }}/cron.log 2>&1
+    state: present
+
+- name: "[pgbackrest] Add differential backup cron job (Mon-Sat 01:00)"
+  ansible.builtin.cron:
+    name: "pgbackrest diff backup"
+    user: postgres
+    weekday: "1-6"
+    hour: "1"
+    minute: "0"
+    job: >
+      curl -sf http://{{ internal_ip }}:{{ patroni_restapi_port }}/leader > /dev/null
+      && pgbackrest --stanza={{ patroni_cluster_name }} --type=diff backup
+      >> {{ pgbackrest_log_dir }}/cron.log 2>&1
+    state: present
+
+- name: "[pgbackrest] Show setup summary"
+  ansible.builtin.debug:
+    msg:
+      - "pgBackRest installed on {{ inventory_hostname }}"
+      - "Config: {{ pgbackrest_config_file }}"
+      - "Repository: {{ pgbackrest_repo_path }}"
+      - "Stanza: {{ patroni_cluster_name }}"
+      - "Full backup: every Sunday at 01:00"
+      - "Diff backup: Mon-Sat at 01:00"
+      - "Backups only run on the current Patroni leader"

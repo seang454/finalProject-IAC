@@ -166,6 +166,16 @@
   roles:
     - role: pgbackrest
 
+# Requires pgBackRest to be installed first (just backup-setup)
+- name: Deploy backup scripts and cron jobs
+  hosts: patroni_cluster
+  gather_facts: true
+  become: true
+  tags: [backup-scripts, never]
+
+  roles:
+    - role: backup-scripts
+
 # ── 8. Setup HAProxy on dedicated ha-proxy nodes ──────────────────────────────
 - name: Setup HAProxy load balancer
   hosts: haproxy

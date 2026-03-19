@@ -46,59 +46,100 @@ refresh:
 site:
     @echo "Starting Patroni HA database cluster setup..."
     python3 refresh_inventory.py
-    {{ venv }}/ansible-playbook site.yml --ask-become-pass
+    {{ venv }}/ansible-playbook site.yml
 
 # Run with vault password prompt
 site-vault:
     @echo "🔐 Starting cluster setup with vault..."
-    {{ venv }}/ansible-playbook site.yml --ask-vault-pass --ask-become-pass
+    {{ venv }}/ansible-playbook site.yml --ask-vault-pass
 
 # ── Individual roles ──────────────────────────────────────────────────────────
 
 # Configure /etc/hosts on all nodes
 hosts:
     @echo "📋 Configuring hostnames..."
-    {{ venv }}/ansible-playbook site.yml --tags hosts --ask-become-pass
+    {{ venv }}/ansible-playbook site.yml --tags hosts
 
 # Install and start etcd cluster
 etcd:
     @echo "🗄️  Setting up etcd cluster..."
-    {{ venv }}/ansible-playbook site.yml --tags etcd --ask-become-pass
+    {{ venv }}/ansible-playbook site.yml --tags etcd
 
 # Install PostgreSQL
 postgresql:
     @echo "🐘 Installing PostgreSQL..."
-    {{ venv }}/ansible-playbook site.yml --tags postgresql --ask-become-pass
+    {{ venv }}/ansible-playbook site.yml --tags postgresql
 
 # Install and configure Patroni
 patroni:
     @echo "👑 Configuring Patroni..."
-    {{ venv }}/ansible-playbook site.yml --tags patroni --ask-become-pass
+    {{ venv }}/ansible-playbook site.yml --tags patroni
 
 # Bootstrap leader only
 patroni-leader:
     @echo "👑 Bootstrapping Patroni leader..."
-    {{ venv }}/ansible-playbook site.yml --tags patroni-leader --ask-become-pass
+    {{ venv }}/ansible-playbook site.yml --tags patroni-leader
 
 # Join replicas
 patroni-replicas:
     @echo "🔁 Joining Patroni replicas..."
-    {{ venv }}/ansible-playbook site.yml --tags patroni-replicas --ask-become-pass
+    {{ venv }}/ansible-playbook site.yml --tags patroni-replicas
 
 # Install and configure HAProxy
 haproxy:
     @echo "⚖️  Setting up HAProxy..."
-    {{ venv }}/ansible-playbook site.yml --tags haproxy --ask-become-pass
+    {{ venv }}/ansible-playbook site.yml --tags haproxy
 
 # Install and configure Keepalived
 keepalived:
     @echo "💓 Setting up Keepalived VIP..."
-    {{ venv }}/ansible-playbook site.yml --tags keepalived --ask-become-pass
+    {{ venv }}/ansible-playbook site.yml --tags keepalived
 
-# install backup
-backup:
-    @echo "💓 Setting up Keepalived VIP..."
-    {{ venv }}/ansible-playbook site.yml --tags backup --ask-become-pass
+# ── Backup (pgBackRest) ───────────────────────────────────────────────────────
+
+# Install and configure pgBackRest on all pg-nodes
+backup-setup:
+    @echo "💾 Setting up pgBackRest backup..."
+    {{ venv }}/ansible-playbook site.yml -i inventory/hosts.ini --tags pgbackrest
+
+# Deploy backup script and cron jobs to all pg-nodes (run after backup-setup)
+backup-scripts:
+    @echo "📜 Deploying backup scripts and cron jobs..."
+    {{ venv }}/ansible-playbook site.yml -i inventory/hosts.ini --tags backup-scripts -e "backup_scripts_state=present"
+
+# Remove backup script and cron jobs from all pg-nodes
+backup-scripts-remove:
+    @echo "🗑️  Removing backup scripts and cron jobs..."
+    {{ venv }}/ansible-playbook site.yml -i inventory/hosts.ini --tags backup-scripts -e "backup_scripts_state=absent"
+
+# Run a full backup now (on the current leader)
+backup-full:
+    @echo "💾 Running full backup..."
+    {{ venv }}/ansible patroni_cluster -m command \
+        -a "sudo -u postgres /usr/local/bin/patroni-backup.sh full" \
+        -i inventory/hosts.ini
+
+# Run a differential backup now (on the current leader)
+backup-diff:
+    @echo "💾 Running differential backup..."
+    {{ venv }}/ansible patroni_cluster -m command \
+        -a "sudo -u postgres /usr/local/bin/patroni-backup.sh diff" \
+        -i inventory/hosts.ini
+
+# Show backup info and history
+backup-info:
+    @echo "📋 Showing backup info..."
+    {{ venv }}/ansible patroni_cluster -m command \
+        -a "sudo -u postgres pgbackrest --stanza=postgres-cluster info" \
+        -i inventory/hosts.ini
+
+# Verify backup integrity (leader only — replicas skip automatically)
+backup-verify:
+    @echo "🔍 Verifying backup integrity..."
+    {{ venv }}/ansible patroni_cluster -m shell \
+        -a "curl -sf http://localhost:8008/leader > /dev/null && sudo -u postgres pgbackrest --stanza=postgres-cluster check || echo 'SKIPPED — not the leader'" \
+        -i inventory/hosts.ini
+
 # ── Operations ────────────────────────────────────────────────────────────────
 
 # Verify cluster health
@@ -135,11 +176,11 @@ ping:
     @echo "🏓 Pinging all nodes..."
     {{ venv }}/ansible all -m ping -i inventory/hosts.ini
 
-# Check etcd cluster health
+# Check etcd cluster health (uses v2 API — etcd 3.3 installed via apt)
 etcd-health:
     @echo "🔍 Checking etcd health..."
     {{ venv }}/ansible etcd_cluster -m command \
-        -a "etcdctl endpoint health --endpoints=http://localhost:2379" \
+        -a "etcdctl cluster-health" \
         -i inventory/hosts.ini
 
 # Check HAProxy stats on all ha-proxy nodes
@@ -152,14 +193,13 @@ haproxy-stats:
 # Check which ha-proxy node holds the VIP
 vip:
     @echo "🌐 Checking VIP location..."
-    {{ venv }}/ansible keepalived -m command \
-        -a "ip addr show | grep 192.168.1.200" \
-        -i inventory/hosts.ini \
-        --ignore-errors
+    {{ venv }}/ansible keepalived -m shell \
+        -a "ip addr show | grep 10.154.0.100 && echo 'VIP IS HERE' || echo 'VIP not on this node'" \
+        -i inventory/hosts.ini
 
 # ── Full workflow ─────────────────────────────────────────────────────────────
 
-# Full setup from scratch: provision → configure
+# Full setup from scratch: provision → configure → backup
 all:
     @echo "Full cluster setup from scratch..."
     just provision
@@ -167,6 +207,7 @@ all:
     sleep 30
     just refresh
     just site
+    just backup-setup
     just verify
     @echo "Cluster is ready!"
 
